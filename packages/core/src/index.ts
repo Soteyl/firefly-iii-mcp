@@ -15,6 +15,7 @@ export { generatedTools } from './tools.js';
 // Export presets
 export { 
   ALL_TOOL_TAGS,
+  RAW_TOOL_TAG,
   DEFAULT_PRESET_TAGS,
   TOOL_PRESETS,
   getPresetTags,

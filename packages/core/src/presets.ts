@@ -1,3 +1,5 @@
+import { generatedTools } from "./tools.js";
+
 /**
  * Firefly III MCP Tool Presets
  * 
@@ -7,35 +9,11 @@
 /**
  * All available tool tags in Firefly III API
  */
+export const RAW_TOOL_TAG = "raw";
+
 export const ALL_TOOL_TAGS = [
-  "about",
-  "accounts",
-  "attachments",
-  "autocomplete",
-  "available_budgets",
-  "bills",
-  "budgets",
-  "categories",
-  "charts",
-  "configuration",
-  "currencies",
-  "currency_exchange_rates",
-  "data",
-  "insight",
-  "links",
-  "object_groups",
-  "piggy_banks",
-  "preferences",
-  "recurrences",
-  "rule_groups",
-  "rules",
-  "search",
-  "summary",
-  "tags",
-  "transactions",
-  "user_groups",
-  "users",
-  "webhooks",
+  ...new Set(generatedTools.flatMap((tool) => tool.tags)),
+  RAW_TOOL_TAG,
 ];
 
 /**

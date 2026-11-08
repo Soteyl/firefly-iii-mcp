@@ -1,6 +1,6 @@
 {
   "name": "@firefly-iii-mcp/server",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Host Firefly III MCP server as a service.",
   "type": "module",
   "bin": {
@@ -23,8 +23,8 @@
     "test": "echo \"No tests specified\" && exit 0"
   },
   "dependencies": {
-    "@firefly-iii-mcp/core": "1.4.0",
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@firefly-iii-mcp/core": "2.0.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "compression": "^1.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",

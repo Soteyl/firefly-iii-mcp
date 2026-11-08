@@ -1,190 +1,31 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
+  CallToolRequest,
+  CallToolRequestSchema,
+  CallToolResult,
   ListToolsRequestSchema,
   Tool,
-  CallToolRequestSchema,
-  CallToolRequest,
-  CallToolResult
 } from "@modelcontextprotocol/sdk/types.js";
-import { CallToolRequestArguments, McpServerConfig, McpToolDefinition } from "./types.js";
+import { RAW_REQUEST_TOOL_NAME, executeApiTool, executeRawRequest, rawRequestTool, sanitizeInputSchema } from "./executor.js";
+import { DEFAULT_PRESET_TAGS, RAW_TOOL_TAG } from "./presets.js";
 import { generatedTools } from "./tools.js";
-import { Schema, Validator } from "@cfworker/json-schema";
-import { openapiSchemaToJsonSchema } from "@openapi-contrib/openapi-schema-to-json-schema";
-import { DEFAULT_PRESET_TAGS } from "./presets.js";
+import { McpServerConfig } from "./types.js";
 
-/**
- * Anthropic (and some other LLM providers) reject tool input-schema property
- * keys that don't match the pattern ^[a-zA-Z0-9_.-]{1,64}$. Firefly III's
- * OpenAPI spec uses PHP-style array query parameters such as "accounts[]",
- * "tags[]", "categories[]" etc. The "[" and "]" characters violate that
- * pattern, which makes the API reject the *entire* tools payload with a 400
- * and irrecoverably poisons the client session.
- *
- * We therefore expose a sanitized key to clients (the trailing "[]" stripped)
- * while keeping the real query-parameter name ("accounts[]") for the upstream
- * Firefly III request. See sanitizeInputSchema (used on tool listing) and the
- * fallback lookup in executeApiTool.
- */
-export const sanitizePropertyKey = (key: string): string =>
-  key.endsWith('[]') ? key.slice(0, -2) : key;
+export { executeApiTool, sanitizeInputSchema, sanitizePropertyKey } from "./executor.js";
 
-// Recursively rewrite property keys (and matching "required" entries) so that
-// every key in the schema satisfies the provider key pattern.
-export const sanitizeInputSchema = (node: any): any => {
-  if (Array.isArray(node)) {
-    return node.map(sanitizeInputSchema);
-  }
-  if (node && typeof node === 'object') {
-    const out: Record<string, any> = {};
-    for (const [key, value] of Object.entries(node)) {
-      if (key === 'properties' && value && typeof value === 'object' && !Array.isArray(value)) {
-        const props: Record<string, any> = {};
-        for (const [propKey, propValue] of Object.entries(value as Record<string, any>)) {
-          props[sanitizePropertyKey(propKey)] = sanitizeInputSchema(propValue);
-        }
-        out[key] = props;
-      } else if (key === 'required' && Array.isArray(value)) {
-        out[key] = (value as string[]).map(sanitizePropertyKey);
-      } else {
-        out[key] = sanitizeInputSchema(value);
-      }
-    }
-    return out;
-  }
-  return node;
-};
+const SERVER_INFO = { name: "Firefly III MCP Agent", version: "2.0.0" };
 
-export const executeApiTool = async (
-  toolName: string,
-  definition: McpToolDefinition,
-  toolArgs: CallToolRequestArguments,
-  serverConfig: McpServerConfig,
-): Promise<CallToolResult> => {
-  let validatedArgs: CallToolRequestArguments;
-  try {
-    // Validate arguments against the input schema
-    const schema = openapiSchemaToJsonSchema(definition.inputSchema);
-    const validator = new Validator(schema as Schema, '4')
-    const argsToParse = (typeof toolArgs === 'object' && toolArgs !== null) ? toolArgs : {};
-    const validatedResult = validator.validate(argsToParse);
-    if (validatedResult.valid) {
-      validatedArgs = argsToParse;
-    } else {
-      const errors = validatedResult.errors;
-      return {
-        content: [{
-          type: 'text', text: JSON.stringify({
-            message: `Invalid arguments for tool '${toolName}'`,
-            errors: errors,
-          }, null, 2)
-        }]
-      };
-    }
-  } catch (error: unknown) {
-    return {
-      content: [{
-        type: 'text', text: JSON.stringify({
-          message: `Error validating arguments for tool '${toolName}'`,
-          error: error,
-        }, null, 2)
-      }]
-    }
-  }
-
-  // Prepare URL, query parameters, headers, and request body
-  let urlPath = definition.pathTemplate;
-  const queryParams: Record<string, any> = {};
-  const headers: Record<string, string> = { 'Accept': 'application/json' };
-  let requestBodyData: unknown = undefined;
-
-  // Apply parameters to the URL path, query, or headers
-  definition.executionParameters.forEach((param) => {
-    // The schema is exposed to clients with sanitized keys (e.g. "accounts"),
-    // but the upstream query parameter name keeps its brackets ("accounts[]").
-    // Look the value up under either form.
-    const value = validatedArgs[param.name] ?? validatedArgs[sanitizePropertyKey(param.name)];
-    if (typeof value !== 'undefined' && value !== null) {
-      if (param.in === 'path') {
-        urlPath = urlPath.replace(`{${param.name}}`, encodeURIComponent(String(value)));
-      }
-      else if (param.in === 'query') {
-        queryParams[param.name] = value;
-      }
-      else if (param.in === 'header') {
-        headers[param.name.toLowerCase()] = String(value);
-      }
-    }
-  });
-
-  // Ensure all path parameters are resolved
-  if (urlPath.includes('{')) {
-    throw new Error(`Failed to resolve path parameters: ${urlPath}`);
-  }
-
-  // Handle request body if needed
-  if (definition.requestBodyContentType && typeof validatedArgs['requestBody'] !== 'undefined') {
-    requestBodyData = validatedArgs['requestBody'];
-    headers['content-type'] = definition.requestBodyContentType;
-  }
-
-  /**
-   * Used Preloaded Security Schemes, ignored for now
-   */
-  const { pat, baseUrl } = serverConfig;
-  headers['Authorization'] = `Bearer ${pat}`;
-
-  // Construct the full URL
-  const requestEndpoint = `${baseUrl}/api${urlPath}`
-  const requestUrl = queryParams ? `${requestEndpoint}?${new URLSearchParams(queryParams).toString()}` : requestEndpoint;
-  const requestMethod = definition.method.toUpperCase();
-
-  // Log request info to stderr (doesn't affect MCP output)
-  console.debug(`Executing tool "${toolName}": ${requestMethod} ${requestEndpoint}`);
-
-  const response = await fetch(requestUrl, {
-    method: definition.method.toUpperCase(),
-    headers: headers,
-    body: requestBodyData ? JSON.stringify(requestBodyData) : undefined,
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    return {
-      content: [{
-        type: 'text', text: JSON.stringify({
-          message: `Error executing tool '${toolName}': ${response.status} ${response.statusText}`,
-          error: errorText,
-        }, null, 2)
-      }]
-    }
-  }
-
-  const responseType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
-  if (responseType?.includes('json')) {
-    const responseData = await response.json();
-    return {
-      content: [{
-        type: 'text', text: JSON.stringify(responseData, null, 2)
-      }]
-    }
-  } else if (responseType?.includes('text')) {
-    const responseText = await response.text();
-    return {
-      content: [{
-        type: 'text', text: responseText
-      }]
-    }
-  }
-
-  // Default to text response for unsupported types
-  return {
-    content: [{
-      type: 'text', text: JSON.stringify({
-        error: `Unsupported response type: ${responseType}`,
-        message: `Unsupported response type: ${responseType}`,
-      }, null, 2)
-    }]
-  }
+function misconfiguredServer(name: string, error: string): Server {
+  const server = new Server(SERVER_INFO, { capabilities: { tools: {} } });
+  const message = "Please check your configuration and restart the server.";
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [{ name, description: `${error}. ${message}`, inputSchema: { type: "object" } } as Tool],
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async (): Promise<CallToolResult> => ({
+    content: [{ type: "text", text: JSON.stringify({ error, message }, null, 2) }],
+    isError: true,
+  }));
+  return server;
 }
 
 /**
@@ -193,109 +34,48 @@ export const executeApiTool = async (
  * @returns The MCP server instance
  */
 export const getServer = (serverConfig: McpServerConfig): Server => {
-  const server = new Server(
-    {
-      name: 'Firefly III MCP Agent',
-      version: '1.3.0',
-    }, {
-    capabilities: { tools: {} }
-  })
-
   if (!serverConfig.baseUrl) {
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const unavailableTool: Tool = {
-        name: 'unavailable',
-        description: 'This tool is not available because the base URL is not configured. Please check your configuration and restart the server.',
-        inputSchema: {
-          type: 'object'
-        },
-        outputSchema: {
-          type: 'object',
-          properties: {
-            error: {
-              type: 'string',
-              description: 'The error message'
-            },
-            message: {
-              type: 'string',
-              description: 'The error message'
-            }
-          }
-        }
-      }
-      return { tools: [unavailableTool] }
-    })
-    server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest): Promise<CallToolResult> => {
-      return {
-        content: [{
-          type: "text", text: JSON.stringify({
-            error: 'Unavailable',
-            message: 'Please check your configuration and restart the server.',
-          }, null, 2)
-        }]
-      };
-    });
-    return server;
+    return misconfiguredServer("unavailable", "The base URL is not configured");
   }
-
   if (!serverConfig.pat) {
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const unauthorizedTool: Tool = {
-        name: 'unauthorized',
-        description: 'This tool is not available because the user is not authenticated. Please check your configuration and restart the server.',
-        inputSchema: {
-          type: 'object'
-        },
-        outputSchema: {
-          type: 'object',
-          properties: {
-            error: {
-              type: 'string',
-              description: 'The error message'
-            },
-            message: {
-              type: 'string',
-              description: 'The error message'
-            }
-          }
-        }
-      }
-      return { tools: [unauthorizedTool] }
-    })
-    server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest): Promise<CallToolResult> => {
-      return {
-        content: [{
-          type: "text", text: JSON.stringify({
-            error: 'Unauthorized',
-            message: 'Please check your configuration and restart the server.',
-          }, null, 2)
-        }]
-      };
-    });
-    return server;
+    return misconfiguredServer("unauthorized", "The personal access token is not configured");
   }
 
-  const enableToolTags = serverConfig.enableToolTags ?? DEFAULT_PRESET_TAGS;
+  const enabledTags = serverConfig.enableToolTags ?? DEFAULT_PRESET_TAGS;
+  const isEnabled = (tags: string[]) => enabledTags.length === 0 || enabledTags.some((tag) => tags.includes(tag));
+  const tools = generatedTools.filter((definition) => isEnabled(definition.tags));
+  const rawEnabled = enabledTags.includes(RAW_TOOL_TAG);
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const toolsForClient: Tool[] = generatedTools.filter(def => enableToolTags.length === 0 || enableToolTags.some(tag => def.tags.includes(tag))).map(def => ({
-      name: def.name,
-      description: def.description,
-      inputSchema: {
-        ...sanitizeInputSchema(def.inputSchema),
-        type: 'object',
-      },
-    }));
-    return { tools: toolsForClient };
-  });
+  const server = new Server(SERVER_INFO, { capabilities: { tools: {} } });
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [
+      ...tools.map(
+        (definition) =>
+          ({
+            name: definition.name,
+            description: definition.description,
+            inputSchema: { ...sanitizeInputSchema(definition.inputSchema), type: "object" },
+          }) as Tool,
+      ),
+      ...(rawEnabled ? [rawRequestTool] : []),
+    ],
+  }));
+
   server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest): Promise<CallToolResult> => {
-    const { name: toolName, arguments: toolArgs } = request.params;
-    const toolDefinition = generatedTools.find(tool => tool.name === toolName);
-    if (!toolDefinition) {
-      console.error(`Error: Unknown tool requested: ${toolName}`);
-      return { content: [{ type: "text", text: `Error: Unknown tool requested: ${toolName}` }] };
+    const { name, arguments: args } = request.params;
+    if (name === RAW_REQUEST_TOOL_NAME && rawEnabled) {
+      return executeRawRequest(args ?? {}, serverConfig);
     }
-    return await executeApiTool(toolName, toolDefinition, toolArgs ?? {}, serverConfig);
+    const definition = tools.find((tool) => tool.name === name);
+    if (!definition) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: `Unknown tool: ${name}`, message: `Unknown tool: ${name}` }) }],
+        isError: true,
+      };
+    }
+    return executeApiTool(name, definition, args ?? {}, serverConfig);
   });
+
   return server;
-}
+};

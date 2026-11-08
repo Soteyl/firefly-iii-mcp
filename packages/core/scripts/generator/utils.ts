@@ -116,13 +116,14 @@ export function generateInputSchemaAndDetails(operation: OpenAPIV3.OperationObje
 
   if (operation.requestBody) {
     const opRequestBody = operation.requestBody as OpenAPIV3.RequestBodyObject;
-    const jsonContent = opRequestBody.content?.['application/json'];
+    const jsonContentType = Object.keys(opRequestBody.content ?? {}).find((type) => type.includes('json'));
+    const jsonContent = jsonContentType ? opRequestBody.content[jsonContentType] : undefined;
     const firstContent = opRequestBody.content
       ? Object.entries(opRequestBody.content)[0]
       : undefined;
 
     if (jsonContent?.schema) {
-      requestBodyContentType = 'application/json';
+      requestBodyContentType = jsonContentType;
       const bodySchema = mapOpenApiSchemaToJsonSchema(jsonContent.schema as OpenAPIV3.SchemaObject);
 
       if (typeof bodySchema === 'object') {
@@ -138,7 +139,10 @@ export function generateInputSchemaAndDetails(operation: OpenAPIV3.OperationObje
 
       properties['requestBody'] = {
         type: 'string',
-        description: opRequestBody.description || `Request body (content type: ${contentType})`,
+        description:
+          contentType === 'application/octet-stream'
+            ? 'Base64-encoded file content.'
+            : opRequestBody.description || `Request body (content type: ${contentType})`,
       };
 
       if (opRequestBody.required) required.push('requestBody');

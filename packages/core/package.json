@@ -1,6 +1,6 @@
 {
   "name": "@firefly-iii-mcp/core",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "core modules for Firefly III MCP server",
   "type": "module",
   "private": false,
@@ -15,14 +15,14 @@
     "toolgen": "npx tsx scripts/generate-tools.ts",
     "build": "tsc",
     "clean": "rimraf dist",
-    "prebuild": "npm run clean && npm run toolgen",
     "prepublishOnly": "npm run build",
     "lint": "eslint src/**/*.ts",
-    "test": "echo \"No tests specified\" && exit 0"
+    "test": "npx tsx --test test/*.test.ts",
+    "prebuild": "npm run clean"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
-    "@modelcontextprotocol/sdk": "1.12.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@openapi-contrib/openapi-schema-to-json-schema": "^5.1.0"
   },
   "devDependencies": {
